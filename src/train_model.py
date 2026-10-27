@@ -1,15 +1,20 @@
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
+#from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
     ConfusionMatrixDisplay,
 )
+#from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import f1_score
 import matplotlib.pyplot as plt
 
 
@@ -44,6 +49,14 @@ features = [
     "away_previous_matches",
     "away_avg_goals_scored",
     "away_avg_goals_conceded",
+    "home_points_per_match",
+    "away_points_per_match",
+    "home_avg_goal_difference",
+    "away_avg_goal_difference",
+    "home_last5_points",
+    "away_last5_points",
+    "home_last5_goal_difference",
+    "away_last5_goal_difference",
 ]
 
 X = df[features].copy()
@@ -93,37 +106,126 @@ print(
 
 
 # --------------------------------------------------
-# 4. Create the machine-learning pipeline
+# 4. Prepare chronological cross-validation
 # --------------------------------------------------
 
-model = Pipeline(
-    steps=[
-        ("imputer", SimpleImputer(strategy="median")),
-        ("classifier", LogisticRegression(max_iter=1000)),
-    ]
+# Reset indices so that cross-validation indices match X_train and y_train.
+X_train = X_train.reset_index(drop=True)
+y_train = y_train.reset_index(drop=True)
+
+# Keep the training dates aligned with the training rows.
+train_dates = (
+    df.loc[train_mask, "match_date"]
+    .reset_index(drop=True)
 )
 
+# Extract unique dates in chronological order.
+unique_train_dates = (
+    train_dates
+    .drop_duplicates()
+    .sort_values()
+    .reset_index(drop=True)
+)
+
+# Split unique dates, not individual matches.
+time_splitter = TimeSeriesSplit(n_splits=4)
+
+# Convert date-based splits into row indices for RandomizedSearchCV.
+cv_splits = []
+
+for fold_train_idx, fold_val_idx in time_splitter.split(unique_train_dates):
+
+    fold_train_dates = unique_train_dates.iloc[fold_train_idx]
+    fold_val_dates = unique_train_dates.iloc[fold_val_idx]
+
+    row_train_idx = np.flatnonzero(
+        train_dates.isin(fold_train_dates).to_numpy()
+    )
+
+    row_val_idx = np.flatnonzero(
+        train_dates.isin(fold_val_dates).to_numpy()
+    )
+
+    cv_splits.append((row_train_idx, row_val_idx))
+
+print("\nChronological cross-validation:")
+for fold, (fold_train_idx, fold_val_idx) in enumerate(cv_splits, start=1):
+    print(
+        f"Fold {fold}: "
+        f"{len(fold_train_idx)} training matches, "
+        f"{len(fold_val_idx)} validation matches"
+    )
+
 
 # --------------------------------------------------
-# 5. Train the model
+# 5. Define the model and hyperparameter search
 # --------------------------------------------------
 
-model.fit(X_train, y_train)
+pipeline = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("classifier", RandomForestClassifier(
+        random_state=42,
+        n_jobs=1,
+    )),
+])
 
-print("\nModel training completed.")
+# Hyperparameter combinations to explore.
+param_distributions = {
+    "classifier__n_estimators": [200, 300, 500],
+    "classifier__max_depth": [10, 15, 20, None],
+    "classifier__min_samples_split": [5, 10, 20],
+    "classifier__min_samples_leaf": [2, 4, 8],
+    "classifier__class_weight": [
+        "balanced",
+        "balanced_subsample",
+    ],
+}
 
+search = RandomizedSearchCV(
+    estimator=pipeline,
+    param_distributions=param_distributions,
+    n_iter=20,
+    scoring="f1_macro",
+    cv=cv_splits,
+    random_state=42,
+    n_jobs=-1,
+    verbose=2,
+    refit=True,
+)
 
 # --------------------------------------------------
-# 6. Predict test outcomes
+# 6. Tune and train the best model
+# --------------------------------------------------
+
+search.fit(X_train, y_train)
+
+# RandomizedSearchCV automatically refits the best configuration
+# on the entire training dataset.
+model = search.best_estimator_
+
+print("\nHyperparameter tuning completed.")
+
+print("\nBest hyperparameters:")
+for parameter, value in search.best_params_.items():
+    print(f"{parameter}: {value}")
+
+print(f"\nBest cross-validation macro F1-score: {search.best_score_:.4f}")
+# --------------------------------------------------
+# 7. Predict test outcomes
 # --------------------------------------------------
 
 y_pred = model.predict(X_test)
-
-
 # --------------------------------------------------
-# 7. Evaluate the model
+# 8. Evaluate the model
 # --------------------------------------------------
+# Calculate the F1-score for each class
+print("F1-score (Home win):", f1_score(y_test, y_pred, labels=["H"], average="macro"))
+print("F1-score (Draw):", f1_score(y_test, y_pred, labels=["D"], average="macro"))
+print("F1-score (Away win):", f1_score(y_test, y_pred, labels=["A"], average="macro"))
 
+# Calculate the overall macro F1-score
+macro_f1 = f1_score(y_test, y_pred, average="macro")
+print(f"\nMacro F1-score: {macro_f1:.4f}")
 accuracy = accuracy_score(y_test, y_pred)
 
 print(f"\nTest accuracy: {accuracy:.4f}")
@@ -158,14 +260,14 @@ ConfusionMatrixDisplay.from_predictions(
     values_format="d",
 )
 
-plt.title("TuniFoot Analytics - Logistic Regression")
+plt.title("TuniFoot Analytics - Tuned Random Forest")
 plt.tight_layout()
 
 figures_dir = project_root / "reports" / "figures"
 figures_dir.mkdir(parents=True, exist_ok=True)
 
 plt.savefig(
-    figures_dir / "logistic_regression_confusion_matrix.png",
+    figures_dir / "random_forest_confusion_matrix.png",
     dpi=300,
     bbox_inches="tight",
 )
