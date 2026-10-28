@@ -5,7 +5,7 @@ import numpy as np
 
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.impute import SimpleImputer
-#from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
@@ -13,7 +13,7 @@ from sklearn.metrics import (
     classification_report,
     ConfusionMatrixDisplay,
 )
-#from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score
 import matplotlib.pyplot as plt
 
@@ -28,7 +28,7 @@ file_path = (
     project_root
     / "data"
     / "processed"
-    / "matches_with_features.csv"
+    / "matches_with_elo.csv"
 )
 
 df = pd.read_csv(file_path)
@@ -57,6 +57,9 @@ features = [
     "away_last5_points",
     "home_last5_goal_difference",
     "away_last5_goal_difference",
+    "home_elo",
+    "away_elo",
+    "elo_difference",
 ]
 
 X = df[features].copy()
@@ -103,6 +106,33 @@ print(
     "to",
     df.loc[test_mask, "match_date"].max(),
 )
+# --------------------------------------------------
+# Baseline: Always predict the most frequent class
+# --------------------------------------------------
+
+majority_class = y_train.value_counts().idxmax()
+
+baseline_predictions = [
+    majority_class
+] * len(y_test)
+
+baseline_accuracy = accuracy_score(
+    y_test,
+    baseline_predictions,
+)
+
+baseline_macro_f1 = f1_score(
+    y_test,
+    baseline_predictions,
+    average="macro",
+    zero_division=0,
+)
+
+print("\nMajority-class baseline")
+print("-----------------------")
+print("Predicted class:", majority_class)
+print(f"Accuracy: {baseline_accuracy:.4f}")
+print(f"Macro F1: {baseline_macro_f1:.4f}")
 
 
 # --------------------------------------------------
@@ -158,80 +188,66 @@ for fold, (fold_train_idx, fold_val_idx) in enumerate(cv_splits, start=1):
 
 
 # --------------------------------------------------
-# 5. Define the model and hyperparameter search
+# 5. Define Logistic Regression pipeline
 # --------------------------------------------------
 
 pipeline = Pipeline([
     ("imputer", SimpleImputer(strategy="median")),
-    ("classifier", RandomForestClassifier(
+
+    ("scaler", StandardScaler()),
+
+    ("classifier", LogisticRegression(
+        max_iter=5000,
         random_state=42,
-        n_jobs=1,
+        class_weight="balanced",
     )),
 ])
-
-# Hyperparameter combinations to explore.
-param_distributions = {
-    "classifier__n_estimators": [200, 300, 500],
-    "classifier__max_depth": [10, 15, 20, None],
-    "classifier__min_samples_split": [5, 10, 20],
-    "classifier__min_samples_leaf": [2, 4, 8],
-    "classifier__class_weight": [
-        "balanced",
-        "balanced_subsample",
-    ],
-}
-
-search = RandomizedSearchCV(
-    estimator=pipeline,
-    param_distributions=param_distributions,
-    n_iter=20,
-    scoring="f1_macro",
-    cv=cv_splits,
-    random_state=42,
-    n_jobs=-1,
-    verbose=2,
-    refit=True,
-)
-
 # --------------------------------------------------
-# 6. Tune and train the best model
+# 6. Train Logistic Regression
 # --------------------------------------------------
 
-search.fit(X_train, y_train)
+pipeline.fit(X_train, y_train)
 
-# RandomizedSearchCV automatically refits the best configuration
-# on the entire training dataset.
-model = search.best_estimator_
+print("\nLogistic Regression training completed.")
 
-print("\nHyperparameter tuning completed.")
 
-print("\nBest hyperparameters:")
-for parameter, value in search.best_params_.items():
-    print(f"{parameter}: {value}")
-
-print(f"\nBest cross-validation macro F1-score: {search.best_score_:.4f}")
 # --------------------------------------------------
 # 7. Predict test outcomes
 # --------------------------------------------------
 
-y_pred = model.predict(X_test)
+y_pred = pipeline.predict(X_test)
+
+
 # --------------------------------------------------
 # 8. Evaluate the model
 # --------------------------------------------------
-# Calculate the F1-score for each class
-print("F1-score (Home win):", f1_score(y_test, y_pred, labels=["H"], average="macro"))
-print("F1-score (Draw):", f1_score(y_test, y_pred, labels=["D"], average="macro"))
-print("F1-score (Away win):", f1_score(y_test, y_pred, labels=["A"], average="macro"))
 
-# Calculate the overall macro F1-score
-macro_f1 = f1_score(y_test, y_pred, average="macro")
-print(f"\nMacro F1-score: {macro_f1:.4f}")
 accuracy = accuracy_score(y_test, y_pred)
 
-print(f"\nTest accuracy: {accuracy:.4f}")
+macro_f1 = f1_score(
+    y_test,
+    y_pred,
+    average="macro",
+)
+
+print("\nLogistic Regression + Elo")
+print("-------------------------")
+
+print(f"Test accuracy: {accuracy:.4f}")
 print(f"Test accuracy percentage: {accuracy * 100:.2f}%")
+print(f"Macro F1-score: {macro_f1:.4f}")
+
+print("\nF1-score (Home win):",
+      f1_score(y_test, y_pred, labels=["H"], average="macro"))
+
+print("F1-score (Draw):",
+      f1_score(y_test, y_pred, labels=["D"], average="macro"))
+
+print("F1-score (Away win):",
+      f1_score(y_test, y_pred, labels=["A"], average="macro"))
 
 print("\nClassification report:")
+
 print(
     classification_report(
         y_test,
@@ -248,28 +264,45 @@ print(
 
 
 # --------------------------------------------------
-# 8. Display the confusion matrix
+# 9. Display confusion matrix
 # --------------------------------------------------
 
 ConfusionMatrixDisplay.from_predictions(
     y_test,
     y_pred,
     labels=["H", "D", "A"],
-    display_labels=["Home win", "Draw", "Away win"],
+    display_labels=[
+        "Home win",
+        "Draw",
+        "Away win",
+    ],
     cmap="Blues",
     values_format="d",
 )
 
-plt.title("TuniFoot Analytics - Tuned Random Forest")
+plt.title("TuniFoot Analytics - Logistic Regression + Elo")
+
 plt.tight_layout()
 
 figures_dir = project_root / "reports" / "figures"
 figures_dir.mkdir(parents=True, exist_ok=True)
 
 plt.savefig(
-    figures_dir / "random_forest_confusion_matrix.png",
+    figures_dir / "logistic_regression_elo_confusion_matrix.png",
     dpi=300,
     bbox_inches="tight",
 )
 
 plt.show()
+
+
+
+#F1-score without recent form features = 0.4395 and test accuracy = 0.4666
+
+#F1-score with recent form features = 0.4534 and test accuracy = 0.4816
+
+#F1-score with only recent form features = 0.4080 and test accuracy = 0.4274
+
+#F1-score with elo = 0.4595 and test accuracy = 0.4804
+
+#F1-score LogisticRegression with elo = 0.4460 and test accuracy = 0.4965
